@@ -48,6 +48,28 @@ TEST_CASE("Buffer stops writing when full") {
   CHECK_EQ(buffer.At(cap - 1).x, last);
 }
 
+TEST_CASE("Decimator fires immediately, then every period ticks") {
+  Decimator d(192);
+
+  CHECK_EQ(d.Tick(), true); // t=0 fires at once
+
+  for (int i = 0; i < 191; ++i) {
+    CHECK_EQ(d.Tick(), false);
+  }
+
+  CHECK_EQ(d.Tick(), true); // one period later
+}
+
+TEST_CASE("Decimator restarts its cadence on Reset") {
+  Decimator d(192);
+  d.Tick();
+  d.Tick(); // mid-period
+
+  d.Reset();
+
+  CHECK_EQ(d.Tick(), true); // fresh t=0 fires immediately
+}
+
 TEST_CASE("LerpI interpolates between two frames") {
   CHECK_EQ(LerpI(0, 100, 0), 0); // start
   CHECK_EQ(LerpI(0, 100, 1 << 15), 50); // halfway
@@ -122,6 +144,55 @@ TEST_CASE("When not looping, phasor clamps") {
   CHECK_EQ(p.Finished(), false);
 }
 
+TEST_CASE("One-shot phasor reports the end only once") {
+  Phasor p;
+  p.SetLength(4);
+
+  CHECK_EQ(p.Advance(4 << 16, false), true); // arrives at the end
+  CHECK_EQ(p.Advance(1 << 16, false), false); // pinned: no new event
+  CHECK_EQ(p.Advance(0, false), false); // frozen at the end: no event
+  CHECK_EQ(p.Finished(), true);
+}
+
+TEST_CASE("One-shot phasor reports arrival at zero only once when reversed") {
+  Phasor p;
+  p.SetLength(4);
+  p.Advance(2 << 16, false); // move to frame 2
+
+  CHECK_EQ(p.Advance(-(3 << 16), false), true); // arrives at zero
+  CHECK_EQ(p.Advance(-(1 << 16), false), false); // pinned at zero
+}
+
+TEST_CASE("One-shot phasor does not report reversing away from the start") {
+  Phasor p;
+  p.SetLength(4);
+
+  CHECK_EQ(p.Advance(-(1 << 16), false), false); // never moved: no event
+}
+
+TEST_CASE("SetLength restarts playback from the top") {
+  Phasor p;
+  p.SetLength(10);
+  p.Advance(7 << 16, true); // deep into the old loop
+
+  p.SetLength(4); // a new, shorter recording
+
+  CHECK_EQ(p.Advance(0, true), false); // no phantom wrap event
+  CHECK_EQ(p.Index(), 0); // plays from the start, not mid-loop
+}
+
+TEST_CASE("SetLength clears one-shot finished state") {
+  Phasor p;
+  p.SetLength(4);
+  p.Advance(4 << 16, false); // finish the one-shot
+
+  CHECK_EQ(p.Finished(), true);
+
+  p.SetLength(8); // a new recording
+
+  CHECK_EQ(p.Finished(), false);
+}
+
 TEST_CASE("Phasor reports when it forward wraps") {
   Phasor p;
   p.SetLength(4);
@@ -146,9 +217,21 @@ TEST_CASE("KnobToSpeed maps big knob to bipolar speed") {
   CHECK_EQ(KnobToSpeed(2048 + 10), 0); // inside dead-zone still freezes
 }
 
+TEST_CASE("KnobToSpeed eases in from zero as the knob leaves centre") {
+  // Still inside the do-nothing band around centre: frozen...
+  CHECK_EQ(KnobToSpeed(2048 + 40), 0);
+  CHECK_EQ(KnobToSpeed(2048 - 40), 0);
+
+  // ...and one step further, it barely moves — no sudden jump.
+  CHECK(KnobToSpeed(2048 + 41) > 0);
+  CHECK(KnobToSpeed(2048 + 41) <= 128);
+  CHECK(KnobToSpeed(2048 - 41) < 0);
+  CHECK(KnobToSpeed(2048 - 41) >= -128);
+}
+
 TEST_CASE("ApplyDepth attenuates") {
   CHECK_EQ(ApplyDepth(2000, 0), 0);
-  CHECK_EQ(ApplyDepth(2000, 4095), 1999);
+  CHECK_EQ(ApplyDepth(2000, 4095), 2000); // full CW passes the trace through exactly
   CHECK_EQ(ApplyDepth(2000, 2048), 1000);
   CHECK_EQ(ApplyDepth(-2000, 4095), -2000);
 }
